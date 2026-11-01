@@ -7,6 +7,8 @@ import { config } from "../../package.json";
 import {
   buildMineruFilenameMatcher,
   getMineruMaxAutoPages,
+  getMineruMode,
+  getMineruLocalDocumentConcurrency,
   isGlobalAutoParseEnabled,
   type MineruFilenameMatcher,
 } from "../utils/mineruConfig";
@@ -73,6 +75,13 @@ let currentAbort: AbortController | null = null;
 let currentItemTitle = "";
 let currentStatusMessage = "";
 let currentAttachmentId: number | null = null;
+const activeItems = new Map<
+  number,
+  { entry: QueueEntry; abort: AbortController | null }
+>();
+let queueEpoch = 0;
+const localConcurrency = () =>
+  getMineruMode() === "local" ? getMineruLocalDocumentConcurrency() : 1;
 const staleAbortAttachmentIds = new Set<number>();
 const stoppedAbortAttachmentIds = new Set<number>();
 const progressListeners = new Set<ProgressListener>();
@@ -300,18 +309,18 @@ function removeDeletedAttachmentsFromQueue(ids: number[]): void {
     );
   }
 
-  if (currentAttachmentId !== null && deletedIds.has(currentAttachmentId)) {
-    staleAbortAttachmentIds.add(currentAttachmentId);
-    if (currentAbort) {
-      currentAbort.abort();
-      currentAbort = null;
+  for (const id of deletedIds) {
+    const active = activeItems.get(id);
+    if (active) {
+      staleAbortAttachmentIds.add(id);
+      active.abort?.abort();
     }
   }
 
   if (
     processingQueue.length === 0 &&
     readinessRetryTimers.size === 0 &&
-    currentAttachmentId === null
+    activeItems.size === 0
   ) {
     currentStatusMessage = "";
   }
@@ -358,200 +367,214 @@ async function processQueue(): Promise<void> {
 
   let processedCount = 0;
   let errorCount = 0;
+  const epoch = ++queueEpoch;
 
-  while (processingQueue.length > 0) {
-    if (isPaused) {
-      break;
-    }
-    const entry = processingQueue.shift()!;
-    currentItemTitle = entry.title;
-    currentStatusMessage = `Starting: ${entry.title}`;
-    notifyProgress();
+  const worker = async (): Promise<void> => {
+    while (processingQueue.length > 0 && !isPaused && epoch === queueEpoch) {
+      const entry = processingQueue.shift()!;
+      currentItemTitle = entry.title;
+      currentStatusMessage = `Starting: ${entry.title}`;
+      notifyProgress();
 
-    const validation = validateQueueItem(entry);
-    if (!validation.item) {
-      if (validation.retryable) {
-        if (scheduleReadinessRetry(entry, validation.reason)) {
-          continue;
-        }
-        errorCount++;
-        continue;
-      }
-      discardStaleEntry(entry, validation.reason);
-      continue;
-    }
-    const entryItem = validation.item;
-
-    if (
-      (
-        await getMineruAvailabilityForAttachment(entryItem, {
-          validateSyncedPackage: false,
-        })
-      ).status !== "missing"
-    ) {
-      appLogger.debug(
-        `MinerU auto-parse: skipping available item ${entry.attachmentId}`,
-      );
-      continue;
-    }
-
-    const AbortCtor = getAbortControllerCtor();
-    const abort = AbortCtor ? new AbortCtor() : null;
-    currentAbort = abort;
-    currentAttachmentId = entry.attachmentId;
-
-    try {
-      const pdfItem = getValidatedQueueItem(entry);
-      if (!pdfItem) {
-        discardStaleEntry(entry, "attachment changed before parse");
-        continue;
-      }
-
-      const pdfPath = await (
-        pdfItem as unknown as {
-          getFilePathAsync?: () => Promise<string | false>;
-        }
-      ).getFilePathAsync?.();
-
-      if (!pdfPath) {
-        appLogger.debug(
-          `MinerU auto-parse: no file path for ${entry.attachmentId}`,
-        );
-        if (scheduleReadinessRetry(entry, "No file path")) {
-          continue;
-        }
-        errorCount++;
-        setItemFailed(entry.attachmentId, "No file path");
-        continue;
-      }
-
-      appLogger.debug(`MinerU auto-parse: processing ${entry.title}`);
-      let lastProgressStage = "";
-      const { value: result } = await runMineruTaskOnce(
-        entry.attachmentId,
-        async (report, sharedSignal) => {
-          setItemProcessing(entry.attachmentId);
-          const parsed = await parsePdfWithMineru(
-            pdfPath as string,
-            report,
-            sharedSignal,
-            {
-              attachmentId: entry.attachmentId,
-              maxPages: getMineruMaxAutoPages(),
-            },
-          );
-          if (sharedSignal?.aborted) throw new MineruCancelledError();
-          if (!parsed?.mdContent) return parsed;
-
-          if (!getValidatedQueueItem(entry)) {
-            throw new StaleAutoWatchAttachmentError(
-              "attachment changed before cache write",
-            );
+      const validation = validateQueueItem(entry);
+      if (!validation.item) {
+        if (validation.retryable) {
+          if (scheduleReadinessRetry(entry, validation.reason)) {
+            continue;
           }
+          errorCount++;
+          continue;
+        }
+        discardStaleEntry(entry, validation.reason);
+        continue;
+      }
+      const entryItem = validation.item;
 
-          await publishMineruParsedResult(pdfItem, parsed, sharedSignal);
-          setItemCached(entry.attachmentId);
-          void publishMineruCachePackageForAttachment(entry.attachmentId).then(
-            (published) => {
+      if (
+        (
+          await getMineruAvailabilityForAttachment(entryItem, {
+            validateSyncedPackage: false,
+          })
+        ).status !== "missing"
+      ) {
+        appLogger.debug(
+          `MinerU auto-parse: skipping available item ${entry.attachmentId}`,
+        );
+        continue;
+      }
+
+      const AbortCtor = getAbortControllerCtor();
+      const abort = AbortCtor ? new AbortCtor() : null;
+      activeItems.set(entry.attachmentId, { entry, abort });
+      currentAbort = abort;
+      currentAttachmentId = entry.attachmentId;
+
+      try {
+        const pdfItem = getValidatedQueueItem(entry);
+        if (!pdfItem) {
+          discardStaleEntry(entry, "attachment changed before parse");
+          continue;
+        }
+
+        const pdfPath = await (
+          pdfItem as unknown as {
+            getFilePathAsync?: () => Promise<string | false>;
+          }
+        ).getFilePathAsync?.();
+
+        if (!pdfPath) {
+          appLogger.debug(
+            `MinerU auto-parse: no file path for ${entry.attachmentId}`,
+          );
+          if (scheduleReadinessRetry(entry, "No file path")) {
+            continue;
+          }
+          errorCount++;
+          setItemFailed(entry.attachmentId, "No file path");
+          continue;
+        }
+
+        appLogger.debug(`MinerU auto-parse: processing ${entry.title}`);
+        let lastProgressStage = "";
+        const { value: result } = await runMineruTaskOnce(
+          entry.attachmentId,
+          async (report, sharedSignal) => {
+            setItemProcessing(entry.attachmentId);
+            const parsed = await parsePdfWithMineru(
+              pdfPath as string,
+              report,
+              sharedSignal,
+              {
+                attachmentId: entry.attachmentId,
+                maxPages: getMineruMaxAutoPages(),
+              },
+            );
+            if (sharedSignal?.aborted) throw new MineruCancelledError();
+            if (!parsed?.mdContent) return parsed;
+
+            if (!getValidatedQueueItem(entry)) {
+              throw new StaleAutoWatchAttachmentError(
+                "attachment changed before cache write",
+              );
+            }
+
+            await publishMineruParsedResult(pdfItem, parsed, sharedSignal);
+            setItemCached(entry.attachmentId);
+            void publishMineruCachePackageForAttachment(
+              entry.attachmentId,
+            ).then((published) => {
               if (published.status === "error") {
                 appLogger.warn(
                   "LLM: MinerU sync package publish failed",
                   published,
                 );
               }
-            },
-          );
-          // Flush stale in-memory text cache and disk embedding cache so the
-          // next query picks up MinerU-quality chunks and re-generates embeddings.
-          invalidateCachedContextText(entry.attachmentId);
-          return parsed;
-        },
-        (stage) => {
-          lastProgressStage = stage;
-          currentStatusMessage = `${stage} — ${entry.title}`;
-          notifyProgress();
-        },
-        abort?.signal,
-      );
-
-      if (result?.mdContent) {
-        processedCount++;
-        currentStatusMessage = `Cached: ${entry.title}`;
-        notifyProgress();
-        appLogger.debug(`MinerU auto-parse: cached ${entry.title}`);
-      } else {
-        const reason = lastProgressStage || "No content returned";
-        if (scheduleReadinessRetry(entry, reason)) {
-          continue;
-        }
-        errorCount++;
-        setItemFailed(entry.attachmentId, reason);
-        appLogger.warn(
-          `MinerU auto-parse: no content for ${entry.title}: ${reason}`,
+            });
+            // Flush stale in-memory text cache and disk embedding cache so the
+            // next query picks up MinerU-quality chunks and re-generates embeddings.
+            invalidateCachedContextText(entry.attachmentId);
+            return parsed;
+          },
+          (stage) => {
+            lastProgressStage = stage;
+            currentStatusMessage = `${stage} — ${entry.title}`;
+            notifyProgress();
+          },
+          abort?.signal,
         );
-      }
-    } catch (e) {
-      if (e instanceof StaleAutoWatchAttachmentError) {
-        discardStaleEntry(entry, e.message);
-        continue;
-      }
-      if (e instanceof MineruCancelledError) {
-        if (staleAbortAttachmentIds.has(entry.attachmentId)) {
-          staleAbortAttachmentIds.delete(entry.attachmentId);
-          discardStaleEntry(entry, "attachment deleted while parsing");
+
+        if (result?.mdContent) {
+          processedCount++;
+          currentStatusMessage = `Cached: ${entry.title}`;
+          notifyProgress();
+          appLogger.debug(`MinerU auto-parse: cached ${entry.title}`);
+        } else {
+          const reason = lastProgressStage || "No content returned";
+          if (scheduleReadinessRetry(entry, reason)) {
+            continue;
+          }
+          errorCount++;
+          setItemFailed(entry.attachmentId, reason);
+          appLogger.warn(
+            `MinerU auto-parse: no content for ${entry.title}: ${reason}`,
+          );
+        }
+      } catch (e) {
+        if (e instanceof StaleAutoWatchAttachmentError) {
+          discardStaleEntry(entry, e.message);
           continue;
         }
-        if (stoppedAbortAttachmentIds.has(entry.attachmentId)) {
-          stoppedAbortAttachmentIds.delete(entry.attachmentId);
-          clearItemStatus(entry.attachmentId);
-          appLogger.debug(`MinerU auto-parse: stopped ${entry.title}`);
+        if (e instanceof MineruCancelledError) {
+          if (staleAbortAttachmentIds.has(entry.attachmentId)) {
+            staleAbortAttachmentIds.delete(entry.attachmentId);
+            discardStaleEntry(entry, "attachment deleted while parsing");
+            continue;
+          }
+          if (stoppedAbortAttachmentIds.has(entry.attachmentId)) {
+            stoppedAbortAttachmentIds.delete(entry.attachmentId);
+            clearItemStatus(entry.attachmentId);
+            appLogger.debug(`MinerU auto-parse: stopped ${entry.title}`);
+            break;
+          }
+          errorCount++;
+          appLogger.debug(`MinerU auto-parse: cancelled ${entry.title}`);
+          setItemFailed(entry.attachmentId, "Cancelled");
+          processingQueue.unshift(entry);
+          currentStatusMessage = `Paused: ${entry.title}`;
           break;
         }
+        if (e instanceof MineruRateLimitError) {
+          errorCount++;
+          appLogger.warn(
+            `MinerU auto-parse: rate limited - ${(e as Error).message}`,
+          );
+          setItemFailed(entry.attachmentId, "Rate limited");
+          processingQueue.unshift(entry);
+          isPaused = true;
+          for (const active of activeItems.values()) {
+            if (active.entry.attachmentId !== entry.attachmentId)
+              active.abort?.abort();
+          }
+          showNotification(
+            "MinerU Auto-Parse Paused",
+            "Daily quota reached. Resume tomorrow.",
+          );
+          currentStatusMessage =
+            "MinerU auto-parse paused: daily quota reached.";
+          break;
+        }
+        if (e instanceof MineruPageLimitError) {
+          updateMineruPdfPageCount(entry.attachmentId, e.pageCount);
+          clearItemStatus(entry.attachmentId);
+          appLogger.debug(
+            `MinerU auto-parse: skipped ${entry.title} - ${e.message}`,
+          );
+          currentStatusMessage = `Skipped: ${entry.title} (${e.pageCount} pages)`;
+          notifyProgress();
+          continue;
+        }
         errorCount++;
-        appLogger.debug(`MinerU auto-parse: cancelled ${entry.title}`);
-        setItemFailed(entry.attachmentId, "Cancelled");
-        processingQueue.unshift(entry);
-        currentStatusMessage = `Paused: ${entry.title}`;
-        break;
-      }
-      if (e instanceof MineruRateLimitError) {
-        errorCount++;
+        const errorMsg = (e as Error).message || String(e);
+        setItemFailed(entry.attachmentId, errorMsg);
         appLogger.warn(
-          `MinerU auto-parse: rate limited - ${(e as Error).message}`,
+          `MinerU auto-parse: error processing ${entry.title}:`,
+          e,
         );
-        setItemFailed(entry.attachmentId, "Rate limited");
-        processingQueue.unshift(entry);
-        isPaused = true;
-        showNotification(
-          "MinerU Auto-Parse Paused",
-          "Daily quota reached. Resume tomorrow.",
-        );
-        currentStatusMessage = "MinerU auto-parse paused: daily quota reached.";
-        break;
+      } finally {
+        activeItems.delete(entry.attachmentId);
+        if (epoch === queueEpoch) {
+          const remaining = activeItems.values().next().value;
+          currentAttachmentId = remaining?.entry.attachmentId ?? null;
+          currentAbort = remaining?.abort ?? null;
+          currentItemTitle = remaining?.entry.title ?? "";
+        }
+        staleAbortAttachmentIds.delete(entry.attachmentId);
+        stoppedAbortAttachmentIds.delete(entry.attachmentId);
       }
-      if (e instanceof MineruPageLimitError) {
-        updateMineruPdfPageCount(entry.attachmentId, e.pageCount);
-        clearItemStatus(entry.attachmentId);
-        appLogger.debug(
-          `MinerU auto-parse: skipped ${entry.title} - ${e.message}`,
-        );
-        currentStatusMessage = `Skipped: ${entry.title} (${e.pageCount} pages)`;
-        notifyProgress();
-        continue;
-      }
-      errorCount++;
-      const errorMsg = (e as Error).message || String(e);
-      setItemFailed(entry.attachmentId, errorMsg);
-      appLogger.warn(`MinerU auto-parse: error processing ${entry.title}:`, e);
-    } finally {
-      if (currentAttachmentId === entry.attachmentId) {
-        currentAttachmentId = null;
-        currentAbort = null;
-      }
-      staleAbortAttachmentIds.delete(entry.attachmentId);
-      stoppedAbortAttachmentIds.delete(entry.attachmentId);
     }
-  }
+  };
+  await Promise.all(Array.from({ length: localConcurrency() }, () => worker()));
+  if (epoch !== queueEpoch) return;
 
   currentAbort = null;
   currentAttachmentId = null;
@@ -576,6 +599,7 @@ async function processQueue(): Promise<void> {
       `${errorCount} PDF${errorCount > 1 ? "s" : ""} could not be parsed.`,
     );
   }
+  if (!isPaused && processingQueue.length > 0) void processQueue();
 }
 
 function enqueueForProcessing(
@@ -585,7 +609,7 @@ function enqueueForProcessing(
   readinessRetryCount = 0,
 ): void {
   clearReadinessRetryTimer(attachmentId);
-  if (currentAttachmentId === attachmentId) return;
+  if (activeItems.has(attachmentId)) return;
   if (processingQueue.some((e) => e.attachmentId === attachmentId)) return;
   processingQueue.push({
     attachmentId,
@@ -606,7 +630,7 @@ function enqueueForProcessing(
 }
 
 function shouldConsiderModifiedPdf(attachmentId: number): boolean {
-  if (currentAttachmentId === attachmentId) return false;
+  if (activeItems.has(attachmentId)) return false;
   if (processingQueue.some((entry) => entry.attachmentId === attachmentId)) {
     return false;
   }
@@ -717,7 +741,7 @@ async function handleItemNotification(
 export function startAutoWatch(): void {
   if (notifierId) return;
 
-  stoppedAbortAttachmentIds.clear();
+  if (activeItems.size === 0) stoppedAbortAttachmentIds.clear();
 
   try {
     const notifier = (
@@ -769,10 +793,8 @@ export function startAutoWatch(): void {
 export function pauseAutoWatch(): void {
   if (!isProcessing || isPaused) return;
   isPaused = true;
-  if (currentAbort) {
-    currentAbort.abort();
-    currentAbort = null;
-  }
+  for (const { abort } of activeItems.values()) abort?.abort();
+  currentAbort = null;
   currentStatusMessage = currentItemTitle
     ? `Pausing MinerU auto-parse: ${currentItemTitle}`
     : "Pausing MinerU auto-parse.";
@@ -792,13 +814,12 @@ export function resumeAutoWatch(): void {
 }
 
 export function stopAutoWatch(): void {
-  if (currentAttachmentId !== null) {
-    stoppedAbortAttachmentIds.add(currentAttachmentId);
+  queueEpoch++;
+  for (const [id, active] of activeItems) {
+    stoppedAbortAttachmentIds.add(id);
+    active.abort?.abort();
   }
-  if (currentAbort) {
-    currentAbort.abort();
-    currentAbort = null;
-  }
+  currentAbort = null;
 
   processingQueue = [];
   for (const { timer } of readinessRetryTimers.values()) {
@@ -810,7 +831,7 @@ export function stopAutoWatch(): void {
   currentItemTitle = "";
   currentStatusMessage = "";
   currentAttachmentId = null;
-  staleAbortAttachmentIds.clear();
+  if (activeItems.size === 0) staleAbortAttachmentIds.clear();
 
   if (debounceTimer) {
     clearTimeout(debounceTimer);
@@ -888,13 +909,12 @@ export function isAutoWatchQueueEntryCurrentForTests(
 }
 
 export function resetAutoWatchForTests(): void {
-  if (currentAttachmentId !== null) {
-    stoppedAbortAttachmentIds.add(currentAttachmentId);
+  queueEpoch++;
+  for (const [id, active] of activeItems) {
+    stoppedAbortAttachmentIds.add(id);
+    active.abort?.abort();
   }
-  if (currentAbort) {
-    currentAbort.abort();
-    currentAbort = null;
-  }
+  currentAbort = null;
 
   processingQueue = [];
   for (const { timer } of readinessRetryTimers.values()) {
@@ -906,7 +926,7 @@ export function resetAutoWatchForTests(): void {
   currentItemTitle = "";
   currentStatusMessage = "";
   currentAttachmentId = null;
-  staleAbortAttachmentIds.clear();
+  if (activeItems.size === 0) staleAbortAttachmentIds.clear();
 
   if (debounceTimer) {
     clearTimeout(debounceTimer);

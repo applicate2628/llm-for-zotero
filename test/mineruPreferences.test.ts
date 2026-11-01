@@ -14,6 +14,18 @@ describe("MinerU preferences", function () {
     i18n = readFileSync("src/utils/i18n.ts", "utf8");
   });
 
+  it("exposes local document concurrency in preferences", function () {
+    assert.include(
+      preferences,
+      'id="__addonRef__-mineru-local-document-concurrency"',
+    );
+    assert.include(preferences, 'min="1"');
+    assert.include(preferences, 'max="10"');
+    assert.include(prefs, 'pref("mineruLocalDocumentConcurrency", 2);');
+    assert.include(preferenceScript, "getMineruLocalDocumentConcurrency");
+    assert.include(preferenceScript, "setMineruLocalDocumentConcurrency");
+  });
+
   it("includes Partial in the status legend with the matching purple dot", function () {
     assert.match(
       preferences,

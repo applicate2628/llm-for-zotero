@@ -12,6 +12,7 @@ import {
   getMineruBatchState,
   getMineruItemList,
   pauseBatchProcessing,
+  onBatchStateChange,
   processSelectedItems,
   resetBatchQueue,
   startBatchProcessing,
@@ -847,4 +848,73 @@ describe("mineruBatchProcessor", function () {
     assert.equal(state.processedCount, 0);
     assert.isNull(state.currentItemId);
   });
+  for (const concurrency of [2, 3, 4, 6, 10] as const) {
+    it(
+      "runs with configured local concurrency " + concurrency,
+      async function () {
+        const pdfs: MockItem[] = Array.from(
+          { length: 11 },
+          (_, i) => i + 101,
+        ).map((id) => ({
+          ...createRawPdf(),
+          id,
+          key: "PDF" + id,
+          getFilePathAsync: async () => "/tmp/doc-" + id + ".pdf",
+        }));
+        setupZotero(new Map(pdfs.map((pdf) => [pdf.id, pdf])), {
+          pref: (key) =>
+            key.endsWith(".mineruMode")
+              ? "local"
+              : key.endsWith(".mineruLocalDocumentConcurrency")
+                ? concurrency
+                : undefined,
+        });
+        const started = new Set<number>();
+        const releases = new Map<number, () => void>();
+        const unsubscribe = onBatchStateChange((s) => {
+          if (s.statusMessage.startsWith("holding:")) {
+            started.add(Number(s.statusMessage.slice("holding:".length)));
+          }
+        });
+        const owners = pdfs.map((pdf) =>
+          runMineruTaskOnce(pdf.id, async (report) => {
+            report("holding:" + pdf.id);
+            await new Promise<void>((resolve) => releases.set(pdf.id, resolve));
+            return { mdContent: "# pre-existing owner", files: [] };
+          }),
+        );
+        const waitForCount = async (n: number) => {
+          const deadline = Date.now() + 2500;
+          while (Date.now() < deadline) {
+            if (started.size >= n) return;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          assert.fail(
+            "Expected " + n + " attached workers, got " + started.size,
+          );
+        };
+        try {
+          await processSelectedItems(
+            pdfs.map((pdf) => pdf.id),
+            {
+              overrideEligibility: true,
+            },
+          );
+          await waitForCount(concurrency);
+          assert.equal(
+            started.size,
+            concurrency,
+            "remaining documents wait for workers",
+          );
+          releases.get(101)?.();
+          await waitForCount(concurrency + 1);
+        } finally {
+          releases.forEach((resolve) => resolve());
+          await Promise.allSettled(owners);
+          await waitForBatchState((s) => !s.running);
+          unsubscribe();
+        }
+      },
+    );
+  }
 });

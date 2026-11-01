@@ -100,6 +100,7 @@ pref("mineruAutoWatchCollections", "");
 pref("mineruGlobalAutoParse", false);
 pref("mineruSyncEnabled", false);
 pref("mineruMaxAutoPages", 200);
+pref("mineruLocalDocumentConcurrency", 2);
 pref("mineruExcludePatterns", "");
 pref("libraryTextIndexEnabled", true);
 pref("libraryTextIndexVectors", false);

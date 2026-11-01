@@ -17,6 +17,10 @@ import {
   DEFAULT_MINERU_LOCAL_SERVER_IDLE_MINUTES,
   normalizeMineruLocalServerIdleMinutes,
   getMineruLocalServerIdleMinutes,
+  DEFAULT_MINERU_LOCAL_DOCUMENT_CONCURRENCY,
+  normalizeMineruLocalDocumentConcurrency,
+  getMineruLocalDocumentConcurrency,
+  setMineruLocalDocumentConcurrency,
   setMineruLocalServerIdleMinutes,
   normalizeMineruMode,
   toMineruApiBackend,
@@ -197,6 +201,41 @@ describe("mineruConfig", function () {
         assert.equal(getMineruLocalServerCommand(), "mineru-api");
       } finally {
         (globalThis as any).Zotero = originalZotero;
+      }
+    });
+  });
+
+  describe("local document concurrency setting", function () {
+    it("defaults to two and clamps the configured number to 1-10", function () {
+      assert.equal(DEFAULT_MINERU_LOCAL_DOCUMENT_CONCURRENCY, 2);
+      for (const value of [undefined, null, false, "", "junk"]) {
+        assert.equal(normalizeMineruLocalDocumentConcurrency(value), 2);
+      }
+      assert.equal(normalizeMineruLocalDocumentConcurrency(0), 1);
+      assert.equal(normalizeMineruLocalDocumentConcurrency(1), 1);
+      assert.equal(normalizeMineruLocalDocumentConcurrency("3"), 3);
+      assert.equal(normalizeMineruLocalDocumentConcurrency(3.9), 3);
+      assert.equal(normalizeMineruLocalDocumentConcurrency(11), 10);
+      assert.equal(normalizeMineruLocalDocumentConcurrency(10), 10);
+    });
+
+    it("persists the selected number through Zotero.Prefs", function () {
+      const store = new Map<string, unknown>();
+      const previous = (globalThis as any).Zotero;
+      (globalThis as any).Zotero = {
+        Prefs: {
+          get: (key: string) => store.get(key),
+          set: (key: string, value: unknown) => store.set(key, value),
+        },
+      };
+      try {
+        assert.equal(getMineruLocalDocumentConcurrency(), 2);
+        setMineruLocalDocumentConcurrency(4);
+        assert.equal(getMineruLocalDocumentConcurrency(), 4);
+        setMineruLocalDocumentConcurrency(9);
+        assert.equal(getMineruLocalDocumentConcurrency(), 9);
+      } finally {
+        (globalThis as any).Zotero = previous;
       }
     });
   });

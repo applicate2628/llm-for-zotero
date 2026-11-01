@@ -13,6 +13,8 @@ const MINERU_SYNC_ENABLED_KEY = `${config.prefsPrefix}.mineruSyncEnabled`;
 const MINERU_MAX_AUTO_PAGES_KEY = `${config.prefsPrefix}.mineruMaxAutoPages`;
 const MINERU_EXCLUDE_PATTERNS_KEY = `${config.prefsPrefix}.mineruExcludePatterns`;
 const MINERU_LOCAL_SERVER_COMMAND_KEY = `${config.prefsPrefix}.mineruLocalServerCommand`;
+const MINERU_LOCAL_DOCUMENT_CONCURRENCY_KEY =
+  config.prefsPrefix + ".mineruLocalDocumentConcurrency";
 const MINERU_LOCAL_SERVER_IDLE_MINUTES_KEY = `${config.prefsPrefix}.mineruLocalServerIdleMinutes`;
 
 export const DEFAULT_MINERU_LOCAL_API_BASE = "http://127.0.0.1:8000";
@@ -20,6 +22,7 @@ export const DEFAULT_MINERU_CLOUD_MODEL: MineruCloudModel = "vlm";
 export const DEFAULT_MINERU_LOCAL_BACKEND: MineruLocalBackend = "pipeline";
 export const DEFAULT_MINERU_FORCE_OCR = false;
 export const DEFAULT_MINERU_LOCAL_SERVER_IDLE_MINUTES = 10;
+export const DEFAULT_MINERU_LOCAL_DOCUMENT_CONCURRENCY = 2;
 export const DEFAULT_MINERU_MAX_AUTO_PAGES = 200;
 export const MAX_MINERU_FILENAME_PATTERN_LENGTH = 256;
 
@@ -208,6 +211,37 @@ export function setMineruLocalServerCommand(value: string): void {
   Zotero.Prefs.set(
     MINERU_LOCAL_SERVER_COMMAND_KEY,
     normalizeMineruLocalServerCommand(value),
+    true,
+  );
+}
+
+/** Number of PDFs dispatched by local Zotero queues (not GPU slots). */
+export function normalizeMineruLocalDocumentConcurrency(
+  value: unknown,
+): number {
+  if (
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    typeof value === "boolean"
+  )
+    return DEFAULT_MINERU_LOCAL_DOCUMENT_CONCURRENCY;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed))
+    return DEFAULT_MINERU_LOCAL_DOCUMENT_CONCURRENCY;
+  return Math.min(10, Math.max(1, Math.floor(parsed)));
+}
+
+export function getMineruLocalDocumentConcurrency(): number {
+  return normalizeMineruLocalDocumentConcurrency(
+    Zotero.Prefs.get(MINERU_LOCAL_DOCUMENT_CONCURRENCY_KEY, true),
+  );
+}
+
+export function setMineruLocalDocumentConcurrency(value: number): void {
+  Zotero.Prefs.set(
+    MINERU_LOCAL_DOCUMENT_CONCURRENCY_KEY,
+    normalizeMineruLocalDocumentConcurrency(value),
     true,
   );
 }

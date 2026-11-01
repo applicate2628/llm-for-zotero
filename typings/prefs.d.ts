@@ -104,6 +104,7 @@ declare namespace _ZoteroTypes {
       "mineruGlobalAutoParse": boolean;
       "mineruSyncEnabled": boolean;
       "mineruMaxAutoPages": number;
+      "mineruLocalDocumentConcurrency": number;
       "mineruExcludePatterns": string;
       "libraryTextIndexEnabled": boolean;
       "libraryTextIndexVectors": boolean;

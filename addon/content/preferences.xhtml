@@ -2886,6 +2886,46 @@
                 </html:span>
               </html:div>
 
+              <html:div style="display: flex; flex-direction: column; gap: 4px">
+                <html:label
+                  for="__addonRef__-mineru-local-document-concurrency"
+                  style="
+                    display: block;
+                    font-weight: 600;
+                    font-size: 12px;
+                    color: var(--fill-primary, inherit);
+                    margin-bottom: 2px;
+                  "
+                >
+                  Concurrent local documents
+                </html:label>
+                <html:input
+                  id="__addonRef__-mineru-local-document-concurrency"
+                  type="number"
+                  min="1"
+                  max="10"
+                  step="1"
+                  value="2"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
+                  "
+                ></html:input>
+                <html:span
+                  style="
+                    font-size: 10.5px;
+                    color: var(--fill-secondary, #888);
+                    margin-top: 1px;
+                  "
+                >
+                  Number of PDFs sent to local MinerU simultaneously (1–10).
+                  Separate from the CUDA model's parallel slots.
+                </html:span>
+              </html:div>
+
               <html:div
                 id="__addonRef__-mineru-local-server-managed-container"
                 style="display: none; flex-direction: column; gap: 8px"

@@ -12,6 +12,7 @@ import { zipSync } from "fflate";
 import {
   flushAutoWatchReadinessRetryForTests,
   getAutoWatchStatus,
+  onAutoWatchProgress,
   getAutoWatchReadinessRetryCountForTests,
   getAutoWatchQueueSnapshotForTests,
   handleAutoWatchNotificationForTests,
@@ -823,4 +824,77 @@ describe("mineruAutoWatch", function () {
     assert.isTrue(await hasCachedMineruMd(pdf.id));
     assert.lengthOf(getAutoWatchQueueSnapshotForTests(), 0);
   });
+  for (const concurrency of [2, 3, 4, 6, 10] as const) {
+    it(
+      "runs with configured local concurrency " + concurrency,
+      async function () {
+        const pdfs = Array.from({ length: 11 }, (_, i) => 202 + i * 100).map(
+          (id) => {
+            const pdf = createPdf(id, id - 1);
+            pdf.getFilePathAsync = async () => "/tmp/auto-doc-" + id + ".pdf";
+            return pdf;
+          },
+        );
+        const items = new Map<number, MockItem>();
+        for (const pdf of pdfs) {
+          items.set(pdf.id - 1, createParent(pdf.id - 1, [pdf.id]));
+          items.set(pdf.id, pdf);
+        }
+        setupZotero(items, {
+          pref: (key) =>
+            key.endsWith(".mineruMode")
+              ? "local"
+              : key.endsWith(".mineruLocalDocumentConcurrency")
+                ? concurrency
+                : undefined,
+        });
+        const started = new Set<number>();
+        const releases = new Map<number, () => void>();
+        const unsubscribe = onAutoWatchProgress((s) => {
+          if (s.statusMessage.startsWith("holding:")) {
+            started.add(Number(s.statusMessage.split(" ")[0].slice(8)));
+          }
+        });
+        const owners = pdfs.map((pdf) =>
+          runMineruTaskOnce(pdf.id, async (report) => {
+            report("holding:" + pdf.id);
+            await new Promise<void>((resolve) => releases.set(pdf.id, resolve));
+            return { mdContent: "# pre-existing owner", files: [] };
+          }),
+        );
+        const waitForCount = async (n: number) => {
+          const deadline = Date.now() + 2500;
+          while (Date.now() < deadline) {
+            if (started.size >= n) return;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          assert.fail(
+            "Expected " + n + " attached workers, got " + started.size,
+          );
+        };
+        let processing: Promise<void> | null = null;
+        try {
+          await handleAutoWatchNotificationForTests(
+            "add",
+            "item",
+            pdfs.map((p) => p.id),
+          );
+          processing = processAutoWatchQueueForTests();
+          await waitForCount(concurrency);
+          assert.equal(
+            started.size,
+            concurrency,
+            "remaining documents wait for workers",
+          );
+          releases.get(202)?.();
+          await waitForCount(concurrency + 1);
+        } finally {
+          releases.forEach((resolve) => resolve());
+          await Promise.allSettled(owners);
+          if (processing) await processing;
+          unsubscribe();
+        }
+      },
+    );
+  }
 });

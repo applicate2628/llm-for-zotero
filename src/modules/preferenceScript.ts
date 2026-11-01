@@ -190,6 +190,8 @@ import {
   setMineruLocalApiBase,
   setMineruLocalServerCommand,
   getMineruLocalServerIdleMinutes,
+  getMineruLocalDocumentConcurrency,
+  setMineruLocalDocumentConcurrency,
   setMineruLocalServerIdleMinutes,
   setMineruLocalBackend,
   setMineruMode,
@@ -6289,6 +6291,31 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     mineruLocalServerIdleMinutesInput.addEventListener(
       "blur",
       commitIdleMinutes,
+    );
+  }
+
+  const mineruLocalDocumentConcurrencyInput = doc.querySelector(
+    "#" + config.addonRef + "-mineru-local-document-concurrency",
+  ) as HTMLInputElement | null;
+  if (mineruLocalDocumentConcurrencyInput) {
+    mineruLocalDocumentConcurrencyInput.value = String(
+      getMineruLocalDocumentConcurrency(),
+    );
+    const commitDocumentConcurrency = () => {
+      setMineruLocalDocumentConcurrency(
+        Number(mineruLocalDocumentConcurrencyInput.value),
+      );
+      mineruLocalDocumentConcurrencyInput.value = String(
+        getMineruLocalDocumentConcurrency(),
+      );
+    };
+    mineruLocalDocumentConcurrencyInput.addEventListener(
+      "change",
+      commitDocumentConcurrency,
+    );
+    mineruLocalDocumentConcurrencyInput.addEventListener(
+      "blur",
+      commitDocumentConcurrency,
     );
   }
 

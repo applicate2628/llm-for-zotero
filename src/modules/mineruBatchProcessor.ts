@@ -37,6 +37,8 @@ import {
 import {
   buildMineruFilenameMatcher,
   getMineruMaxAutoPages,
+  getMineruMode,
+  getMineruLocalDocumentConcurrency,
   type MineruFilenameMatcher,
 } from "../utils/mineruConfig";
 
@@ -87,7 +89,13 @@ const state: MineruBatchState = {
 let queue: QueueEntry[] = [];
 let queueBuilt = false;
 const listeners = new Set<(s: MineruBatchState) => void>();
-let currentAbort: AbortController | null = null;
+const activeItems = new Map<
+  number,
+  { title: string; abort: AbortController | null }
+>();
+const activeRuns = new Set<Promise<void>>();
+const localConcurrency = () =>
+  getMineruMode() === "local" ? getMineruLocalDocumentConcurrency() : 1;
 
 function getAbortControllerCtor(): (new () => AbortController) | null {
   return (
@@ -315,26 +323,16 @@ async function buildQueue(): Promise<void> {
 // ── Processing loop ──────────────────────────────────────────────────────────
 
 async function processNext(): Promise<void> {
-  if (state.paused || queue.length === 0) {
-    state.running = false;
-    state.currentItemId = null;
-    state.currentItemTitle = "";
-    currentAbort = null;
-    notify();
-    return;
-  }
-
-  const entry = queue.shift()!;
-  state.currentItemId = entry.attachmentId;
-  state.currentItemTitle = entry.title;
-  state.statusMessage = `Starting: ${entry.title}`;
-  state.error = null;
-  notify();
-
-  // Create an AbortController for this item so pause/stop can cancel it
+  const entry = queue.shift();
+  if (!entry) return;
   const AbortCtor = getAbortControllerCtor();
   const abort = AbortCtor ? new AbortCtor() : null;
-  currentAbort = abort;
+  activeItems.set(entry.attachmentId, { title: entry.title, abort });
+  state.currentItemId = entry.attachmentId;
+  state.currentItemTitle = entry.title;
+  state.statusMessage = "Starting: " + entry.title;
+  state.error = null;
+  notify();
 
   try {
     const pdfItem = Zotero.Items.get(entry.attachmentId);
@@ -343,7 +341,6 @@ async function processNext(): Promise<void> {
         `MinerU batch: item ${entry.attachmentId} not found, skipping`,
       );
       setItemFailed(entry.attachmentId, "Item not found");
-      scheduleNext();
       return;
     }
 
@@ -356,7 +353,6 @@ async function processNext(): Promise<void> {
         `MinerU batch: no file path for ${entry.attachmentId}, skipping`,
       );
       setItemFailed(entry.attachmentId, "No file path");
-      scheduleNext();
       return;
     }
 
@@ -422,31 +418,24 @@ async function processNext(): Promise<void> {
       setItemFailed(entry.attachmentId, "Cancelled");
       // Put the item back so it can be retried on resume
       queue.unshift(entry);
-      state.running = false;
-      state.currentItemId = null;
-      state.currentItemTitle = "";
+      pauseBatchProcessing();
       state.statusMessage = "Paused";
       // Signal the UI that this item did NOT succeed — prevents green dot
       state.lastFailedItemId = entry.attachmentId;
       state.lastFailedMessage = "Cancelled";
-      currentAbort = null;
       notify();
       return;
     }
     if (e instanceof MineruRateLimitError) {
       state.rateLimited = true;
-      state.paused = true;
-      state.running = false;
+      pauseBatchProcessing();
       state.error = e.message || "Daily limit reached. Resume tomorrow.";
       setItemFailed(entry.attachmentId, e.message || "Rate limited");
       state.lastFailedItemId = entry.attachmentId;
       state.lastFailedMessage = e.message || "Daily limit reached";
       state.failedCount++;
-      state.currentItemId = null;
-      state.currentItemTitle = "";
       // Put entry back at front so it retries next time
       queue.unshift(entry);
-      currentAbort = null;
       notify();
       return;
     }
@@ -455,8 +444,6 @@ async function processNext(): Promise<void> {
       clearItemStatus(entry.attachmentId);
       state.totalCount--;
       appLogger.debug(`MinerU batch: skipped "${entry.title}" - ${e.message}`);
-      currentAbort = null;
-      scheduleNext();
       return;
     }
     const errMsg = (e as Error).message || String(e);
@@ -465,18 +452,40 @@ async function processNext(): Promise<void> {
     state.lastFailedItemId = entry.attachmentId;
     state.lastFailedMessage = errMsg;
     state.failedCount++;
+  } finally {
+    activeItems.delete(entry.attachmentId);
+    scheduleNext();
   }
-
-  currentAbort = null;
-  scheduleNext();
 }
 
 function scheduleNext(): void {
-  state.currentItemId = null;
-  state.currentItemTitle = "";
-  state.statusMessage = "";
+  const first = activeItems.entries().next().value as
+    | [number, { title: string; abort: AbortController | null }]
+    | undefined;
+  state.currentItemId = first?.[0] ?? null;
+  state.currentItemTitle = first?.[1].title ?? "";
+  if (activeItems.size === 0 && (state.paused || queue.length === 0)) {
+    state.running = false;
+    if (!state.paused) state.statusMessage = "";
+  }
   notify();
-  setTimeout(() => void processNext(), 500);
+  pumpQueue();
+}
+
+function pumpQueue(): void {
+  while (
+    state.running &&
+    !state.paused &&
+    activeItems.size < localConcurrency() &&
+    queue.length > 0
+  ) {
+    const pending = processNext();
+    activeRuns.add(pending);
+    void pending.finally(() => activeRuns.delete(pending));
+  }
+  if (state.running && activeItems.size === 0 && queue.length === 0) {
+    scheduleNext();
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -507,7 +516,7 @@ export async function startBatchProcessing(): Promise<void> {
     return;
   }
 
-  void processNext();
+  pumpQueue();
 }
 
 /**
@@ -558,21 +567,18 @@ export async function processSelectedItems(
   state.lastFailedItemId = null;
   notify();
 
-  void processNext();
+  pumpQueue();
 }
 
 export function pauseBatchProcessing(): void {
   state.paused = true;
-  // Abort the in-flight operation so pause takes effect immediately
-  if (currentAbort) {
-    currentAbort.abort();
-    currentAbort = null;
-  }
+  for (const { abort } of activeItems.values()) abort?.abort();
   notify();
 }
 
 export async function resetBatchQueue(): Promise<void> {
-  state.paused = true;
+  pauseBatchProcessing();
+  await Promise.allSettled([...activeRuns]);
   state.running = false;
   state.currentItemId = null;
   state.currentItemTitle = "";
