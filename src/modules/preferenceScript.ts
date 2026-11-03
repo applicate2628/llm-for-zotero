@@ -191,6 +191,8 @@ import {
   setMineruLocalServerCommand,
   getMineruLocalServerIdleMinutes,
   getMineruLocalDocumentConcurrency,
+  getMineruPdfPythonPath,
+  setMineruPdfPythonPath,
   setMineruLocalDocumentConcurrency,
   setMineruLocalServerIdleMinutes,
   setMineruLocalBackend,
@@ -6317,6 +6319,19 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       "blur",
       commitDocumentConcurrency,
     );
+  }
+
+  const pdfPython = doc.querySelector(
+    "#" + config.addonRef + "-mineru-pdf-python-path",
+  ) as HTMLInputElement | null;
+  if (pdfPython) {
+    pdfPython.value = getMineruPdfPythonPath();
+    const commit = () => {
+      setMineruPdfPythonPath(pdfPython.value);
+      pdfPython.value = getMineruPdfPythonPath();
+    };
+    pdfPython.addEventListener("change", commit);
+    pdfPython.addEventListener("blur", commit);
   }
 
   const renderManagedServerStatus = (state: MineruServerState) => {

@@ -201,6 +201,22 @@ export function normalizeMineruLocalServerCommand(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+export function getMineruPdfPythonPath(): string {
+  const value = Zotero.Prefs.get(
+    config.prefsPrefix + ".mineruPdfPythonPath",
+    true,
+  );
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function setMineruPdfPythonPath(value: string): void {
+  Zotero.Prefs.set(
+    config.prefsPrefix + ".mineruPdfPythonPath",
+    value.trim(),
+    true,
+  );
+}
+
 export function getMineruLocalServerCommand(): string {
   return normalizeMineruLocalServerCommand(
     Zotero.Prefs.get(MINERU_LOCAL_SERVER_COMMAND_KEY, true),

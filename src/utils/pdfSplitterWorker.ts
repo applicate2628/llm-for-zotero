@@ -48,6 +48,7 @@ scope.onmessage = async ({ data }) => {
         error.message === new EncryptedPDFError().message);
     scope.postMessage({
       id,
+      errorCode: encrypted ? "PDF_ENCRYPTED" : "PDF_PREPARATION_FAILED",
       error: encrypted
         ? "This PDF is encrypted. Save an unencrypted copy before parsing it with MinerU."
         : `Unable to prepare PDF for MinerU: ${error instanceof Error ? error.message : String(error)}`,

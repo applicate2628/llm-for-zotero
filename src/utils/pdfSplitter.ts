@@ -7,6 +7,13 @@ export class PdfSplitterCancelledError extends Error {
   }
 }
 
+export class PdfEncryptedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PdfEncryptedError";
+  }
+}
+
 export type PdfSplitterSession = {
   pageCount: number;
   extractPages: (startPage: number, endPage: number) => Promise<Uint8Array>;
@@ -45,7 +52,12 @@ export async function openPdfSplitter(
     const request = pending.get(data.id);
     if (!request) return;
     pending.delete(data.id);
-    if (data.error) request.reject(new Error(data.error));
+    if (data.error)
+      request.reject(
+        data.errorCode === "PDF_ENCRYPTED"
+          ? new PdfEncryptedError(data.error)
+          : new Error(data.error),
+      );
     else request.resolve(data);
   };
   worker.onerror = (event) => {

@@ -25,6 +25,9 @@ import {
   publishMineruParsedResult,
 } from "../src/services/mineru/mineruParser";
 import { assert } from "chai";
+import { PDFDocument } from "pdf-lib";
+import { createEncryptedPdfFixture } from "./helpers/encryptedPdfFixture";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -92,7 +95,13 @@ describe("MinerU durable recovery", function () {
     clearAllStatuses();
     await closePdfWorkersForTests();
     globalThis.fetch = originalFetch;
-    for (const key of ["Zotero", "ztoolkit", "IOUtils", "PathUtils"])
+    for (const key of [
+      "Zotero",
+      "ztoolkit",
+      "IOUtils",
+      "PathUtils",
+      "ChromeUtils",
+    ])
       delete (globalThis as any)[key];
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -153,6 +162,80 @@ describe("MinerU durable recovery", function () {
       uploads,
       [1, 2, 3],
       "completed work survives cancellation and is not uploaded twice",
+    );
+  });
+  it("uploads prepared short PDFs instead of the original encrypted file, with original source hash", async function () {
+    const original = createEncryptedPdfFixture();
+    const source = path.join(root, "encrypted.pdf");
+    await fs.writeFile(source, original);
+    const prepared = createPdfFixture(1);
+    let normalizerCalls = 0,
+      uploads = 0;
+    (globalThis as any).Zotero.Prefs.get = (key: string) =>
+      key.endsWith(".mineruMode")
+        ? "local"
+        : key.endsWith(".mineruPdfPythonPath")
+          ? "C:\\Python\\python.exe"
+          : "";
+    (globalThis as any).ChromeUtils = {
+      importESModule: () => ({
+        Subprocess: {
+          call: async () => {
+            normalizerCalls++;
+            let sent = false;
+            return {
+              stdin: {
+                write: async (input: ArrayBuffer) =>
+                  assert.deepEqual(new Uint8Array(input), original),
+                close: async () => {},
+              },
+              stdout: {
+                read: async () => {
+                  if (sent) return new ArrayBuffer(0);
+                  sent = true;
+                  return prepared.slice().buffer;
+                },
+                close: async () => {},
+              },
+              stderr: { readString: async () => "", close: async () => {} },
+              wait: async () => ({ exitCode: 0 }),
+              kill: async () => {},
+            };
+          },
+        },
+      }),
+    };
+    globalThis.fetch = (async (_url: any, init: RequestInit) => {
+      const files = [...(init.body as FormData).values()].filter(
+        (value) => typeof value !== "string",
+      ) as Blob[];
+      assert.lengthOf(files, 1);
+      const uploaded = new Uint8Array(await files[0].arrayBuffer());
+      const document = await PDFDocument.load(uploaded);
+      assert.equal(document.getPageCount(), 1);
+      assert.isFalse(document.isEncrypted);
+      uploads++;
+      return new Response(mineruResultFixture(1), { status: 200 });
+    }) as typeof fetch;
+    const stages: string[] = [];
+    const result = await parsePdfWithMineru(
+      source,
+      (stage) => stages.push(stage),
+      undefined,
+      { attachmentId: 4242 },
+    );
+    assert.isNotNull(result, stages.join("\n"));
+    assert.equal(normalizerCalls, 1);
+    assert.equal(uploads, 1);
+    assert.equal(
+      result!.sourceHash,
+      createHash("sha256").update(original).digest("hex"),
+    );
+    assert.deepEqual(new Uint8Array(await fs.readFile(source)), original);
+    assert.isFalse(
+      (await fs.readdir(root)).some((name) =>
+        name.startsWith("mineru-chunks-"),
+      ),
     );
   });
   async function fixture() {
@@ -231,7 +314,8 @@ describe("MinerU durable recovery", function () {
     const io = (globalThis as any).IOUtils;
     const write = io.write;
     io.write = async (p: string, data: Uint8Array, options: unknown) => {
-      if (p.endsWith("/manifest.json")) throw new Error("simulated disk full");
+      if (path.basename(p) === "manifest.json")
+        throw new Error("simulated disk full");
       return write(p, data, options);
     };
     let failure: unknown;
@@ -300,7 +384,7 @@ describe("MinerU durable recovery", function () {
     const write = io.write;
     let indexWrites = 0;
     io.write = async (p: string, data: Uint8Array, options: unknown) => {
-      if (p.endsWith("/checkpoint.json") && ++indexWrites === 2)
+      if (path.basename(p) === "checkpoint.json" && ++indexWrites === 2)
         throw new Error("index write failed");
       return write(p, data, options);
     };
@@ -322,7 +406,7 @@ describe("MinerU durable recovery", function () {
       release = resolve;
     });
     io.write = async (p: string, data: Uint8Array, options: unknown) => {
-      if (p.endsWith("/chunk-1.zip")) {
+      if (path.basename(p) === "chunk-1.zip") {
         reached();
         await gate;
       }

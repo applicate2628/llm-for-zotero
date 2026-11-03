@@ -2926,6 +2926,34 @@
                 </html:span>
               </html:div>
 
+              <html:div style="display: flex; flex-direction: column; gap: 4px">
+                <html:label
+                  for="__addonRef__-mineru-pdf-python-path"
+                  style="font-weight: 600; font-size: 12px"
+                >
+                  PDF preparation Python (optional)
+                </html:label>
+                <html:input
+                  id="__addonRef__-mineru-pdf-python-path"
+                  type="text"
+                  placeholder="Absolute path to python.exe or python3"
+                  style="
+                    width: 100%;
+                    padding: 6px 10px;
+                    font-size: 13px;
+                    border-radius: 6px;
+                    box-sizing: border-box;
+                  "
+                ></html:input>
+                <html:span
+                  style="font-size: 10.5px; color: var(--fill-secondary, #888)"
+                >
+                  Uses an existing Python with pypdf to prepare encrypted PDFs
+                  that open without a password. Originals stay unchanged.
+                  Nothing is installed automatically.
+                </html:span>
+              </html:div>
+
               <html:div
                 id="__addonRef__-mineru-local-server-managed-container"
                 style="display: none; flex-direction: column; gap: 8px"

@@ -15,7 +15,10 @@ import {
 import {
   openPdfSplitter,
   PdfSplitterCancelledError,
+  PdfEncryptedError,
+  type PdfSplitterSession,
 } from "../../utils/pdfSplitter";
+import { normalizePdfBytes } from "../../utils/pdfNormalization";
 import {
   buildMineruPageRanges,
   mergeMineruChunkResults,
@@ -100,7 +103,17 @@ export async function parsePdfWithMineru(
     const pdfBytes = await readPdfBytes(pdfPath);
     if (!pdfBytes) throw new Error("Unable to read the PDF file.");
     report("Reading PDF page count…");
-    const splitter = await openPdfSplitter(pdfBytes, signal);
+    let splitter: PdfSplitterSession;
+    let prepared = false;
+    try {
+      splitter = await openPdfSplitter(pdfBytes, signal);
+    } catch (error) {
+      if (!(error instanceof PdfEncryptedError)) throw error;
+      report("Preparing readable copy of encrypted PDF locally…");
+      const readable = await normalizePdfBytes(pdfBytes, signal);
+      splitter = await openPdfSplitter(readable, signal);
+      prepared = true;
+    }
     try {
       const pageCount = splitter.pageCount;
       if (
@@ -130,7 +143,9 @@ export async function parsePdfWithMineru(
             pageCount,
           )
         : null;
-      if (pageCount <= MINERU_PAGE_CHUNK_SIZE) {
+      // Prepared documents must use fresh chunks, even when there is only one.
+      // Uploading pdfPath here would send the encrypted original again.
+      if (pageCount <= MINERU_PAGE_CHUNK_SIZE && !prepared) {
         splitter.close();
         const result = await parsePdfWithMineruSingle(
           pdfPath,

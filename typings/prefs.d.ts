@@ -105,6 +105,7 @@ declare namespace _ZoteroTypes {
       "mineruSyncEnabled": boolean;
       "mineruMaxAutoPages": number;
       "mineruLocalDocumentConcurrency": number;
+      "mineruPdfPythonPath": string;
       "mineruExcludePatterns": string;
       "libraryTextIndexEnabled": boolean;
       "libraryTextIndexVectors": boolean;

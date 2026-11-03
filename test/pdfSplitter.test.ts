@@ -8,6 +8,7 @@ import {
 import {
   openPdfSplitter,
   PdfSplitterCancelledError,
+  PdfEncryptedError,
 } from "../src/utils/pdfSplitter";
 import {
   createPdfFixture,
@@ -88,6 +89,7 @@ describe("bundled PDF splitter", function () {
 
   it("rejects real encrypted PDFs with an actionable message", async function () {
     const error = await rejected(openPdfSplitter(createEncryptedPdfFixture()));
+    assert.instanceOf(error, PdfEncryptedError);
     assert.include(error.message, "encrypted");
     assert.include(error.message, "unencrypted copy");
   });
